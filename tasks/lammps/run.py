@@ -6,6 +6,7 @@ from invoke import task
 from os import makedirs
 from os.path import basename, join
 from pprint import pprint
+from multiprocessing import Pool
 
 from hoststats.client import HostStats
 
@@ -106,13 +107,13 @@ def faasm(ctx, bench, repeats=1, nprocs=None, procrange=None, graph=False):
 
     host, port = get_faasm_invoke_host_port()
 
-    pod_names = get_faasm_worker_pods()
-    stats = HostStats(
-        pod_names,
-        kubectl=True,
-        kubectl_container="user-container",
-        kubectl_ns="faasm",
-    )
+    # pod_names = get_faasm_worker_pods()
+    # stats = HostStats(
+    #     pod_names,
+    #     kubectl=True,
+    #     kubectl_container="user-container",
+    #     kubectl_ns="faasm",
+    # )
 
     # Set up pid file
     with open(FAASM_PID_FILE, "a+") as f:
@@ -160,7 +161,7 @@ def faasm(ctx, bench, repeats=1, nprocs=None, procrange=None, graph=False):
                 )
 
                 start = time.time()
-                stats.start_collection()
+                # stats.start_collection()
 
                 file_name = basename(_bench["data"][0])
                 cmdline = "-in faasm://lammps-data/{}".format(file_name)
@@ -215,7 +216,7 @@ def faasm(ctx, bench, repeats=1, nprocs=None, procrange=None, graph=False):
                         # If we reach this point it means the call has succeeded
                         break
 
-                stats.stop_and_write_to_csv(stats_csv)
+                # stats.stop_and_write_to_csv(stats_csv)
 
                 _process_lammps_result(response.text, result_file, np, run_num)
 
@@ -227,6 +228,131 @@ def faasm(ctx, bench, repeats=1, nprocs=None, procrange=None, graph=False):
     # Set up pid file
     with open(FAASM_PID_FILE, "a+") as f:
         f.write("===================================\n")
+
+
+def send_request(url, msg):
+    print("Sending request")
+    response = requests.post(url, json=msg, timeout=None)
+    # Get the async message id
+    if response.status_code != 200:
+        print(
+            "Initial request failed: {}:\n{}".format(
+                response.status_code, response.text
+            )
+        )
+    print("Response: {}".format(response.text))
+    msg_id = int(response.text.strip())
+
+    # Record message ids in a file
+    with open(FAASM_PID_FILE, "a+") as f:
+        f.write("{}\n".format(msg_id))
+
+    # Start polling for the result
+    print("Polling message {}".format(msg_id))
+    while True:
+        interval = 2
+        time.sleep(interval)
+
+        status_msg = {
+            "user": LAMMPS_FAASM_USER,
+            "function": LAMMPS_FAASM_FUNC,
+            "status": True,
+            "id": msg_id,
+        }
+        response = requests.post(url, json=status_msg)
+
+        if response.text.startswith("RUNNING"):
+            continue
+        elif response.text.startswith("FAILED"):
+            raise RuntimeError("Call failed")
+        elif not response.text:
+            raise RuntimeError("Empty status response")
+        else:
+            # If we reach this point it means the call has succeeded
+            break
+
+    # _process_lammps_result(response.text, result_file, np, 1)
+
+    print("Results written to {}".format(result_file))
+
+    # Set up pid file
+    with open(FAASM_PID_FILE, "a+") as f:
+        f.write("===================================\n")
+    return True
+
+
+@task
+def race(ctx):
+    """
+    Run race experiment
+    """
+    host, port = get_faasm_invoke_host_port()
+
+    # Set up pid file
+    with open(FAASM_PID_FILE, "a+") as f:
+        f.write("========== BEGIN NEW EXP ==========\n")
+
+    bench = "compute"
+    b = bench
+
+    # Run multiple benchmarks if desired for convenience
+    _bench = get_faasm_benchmark(b)
+
+    result_file = _init_csv_file(
+        "race_lammps_wasm_{}.csv".format(_bench["out_file"])
+    )
+
+    # num processes
+    np = 16
+    print("Running on Faasm with {} MPI processes".format(np))
+
+    # Url and headers for requests
+    url = "http://{}:{}".format(host, port)
+
+    # First, flush the host state
+    print("Flushing functions, state, and shared files from workers")
+    msg = {"type": MESSAGE_TYPE_FLUSH}
+    print("Posting to {} msg:".format(url))
+    pprint(msg)
+
+    response = requests.post(url, json=msg, timeout=None)
+    if response.status_code != 200:
+        print(
+            "Flush request failed: {}:\n{}".format(
+                response.status_code, response.text
+            )
+        )
+    print("Waiting for flush to propagate...")
+    time.sleep(5)
+    print("Done waiting")
+
+    file_name = basename(_bench["data"][0])
+    cmdline = "-in faasm://lammps-data/{}".format(file_name)
+    msg = {
+        "user": LAMMPS_FAASM_USER,
+        "function": LAMMPS_FAASM_FUNC,
+        "cmdline": cmdline,
+        "mpi_world_size": int(np),
+        "async": True,
+    }
+    print("Posting to {} msg:".format(url))
+    pprint(msg)
+
+    # set duplication factor for race condition
+    num_dupl = 32
+    print(f"Posting duplicate: {num_dupl}")
+
+    res = []
+    with Pool(num_dupl) as p:
+        for i in range(num_dupl):
+            p.apply_async(
+                send_request, args=(url, msg), callback=lambda r: res.append(r)
+            )
+        p.close()
+        p.join()
+
+    print(res)
+    print(f"Done posting {num_dupl} duplicates")
 
 
 @task

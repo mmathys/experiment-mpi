@@ -1,6 +1,7 @@
 import json
 import requests
 import time
+from pprint import pprint
 
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
@@ -230,6 +231,8 @@ def thread_pool_thread(
                             work_item.task.task_id
                         )
                     )
+                    print("reason: FAILED in response.")
+                    pprint(vars(response))
                     print("-------------------------------------")
                     actual_time = -1
                     break
@@ -248,6 +251,8 @@ def thread_pool_thread(
                             work_item.task.task_id
                         )
                     )
+                    print("reason: JSON Decode error.")
+                    pprint(vars(response))
                     print("-------------------------------------")
                     actual_time = -1
                     break
