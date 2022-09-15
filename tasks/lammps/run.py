@@ -282,15 +282,11 @@ def send_request(url, msg):
 
 
 @task
-def race(ctx):
+def flush_worker(ctx):
     """
-    Run race experiment
+    flushes workers
     """
     host, port = get_faasm_invoke_host_port()
-
-    # Set up pid file
-    with open(FAASM_PID_FILE, "a+") as f:
-        f.write("========== BEGIN NEW EXP ==========\n")
 
     bench = "compute"
     b = bench
@@ -303,7 +299,50 @@ def race(ctx):
     )
 
     # num processes
-    np = 16
+    np = 8
+    print("Running on Faasm with {} MPI processes".format(np))
+
+    # Url and headers for requests
+    url = "http://{}:{}".format(host, port)
+
+    # First, flush the host state
+    print("Flushing functions, state, and shared files from workers")
+    msg = {"type": MESSAGE_TYPE_FLUSH}
+    print("Posting to {} msg:".format(url))
+    pprint(msg)
+
+    response = requests.post(url, json=msg, timeout=None)
+    if response.status_code != 200:
+        print(
+            "Flush request failed: {}:\n{}".format(
+                response.status_code, response.text
+            )
+        )
+    print("Waiting for flush to propagate...")
+    time.sleep(5)
+    print("Done waiting")
+    
+
+@task
+def race(ctx, np=8, num_dupl=4):
+    """
+    Run race experiment.
+    np: number of MPI processes per task
+    num_dupl: number of tasks that are sent to the worker pool
+    """
+    host, port = get_faasm_invoke_host_port()
+
+    bench = "compute"
+    b = bench
+
+    # Run multiple benchmarks if desired for convenience
+    _bench = get_faasm_benchmark(b)
+
+    result_file = _init_csv_file(
+        "race_lammps_wasm_{}.csv".format(_bench["out_file"])
+    )
+
+    # num processes
     print("Running on Faasm with {} MPI processes".format(np))
 
     # Url and headers for requests
@@ -339,7 +378,6 @@ def race(ctx):
     pprint(msg)
 
     # set duplication factor for race condition
-    num_dupl = 32
     print(f"Posting duplicate: {num_dupl}")
 
     res = []
